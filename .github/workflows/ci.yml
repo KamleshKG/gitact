@@ -32,7 +32,7 @@ jobs:
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       uses: mr-smithers-excellent/docker-build-push@v6
       with:
-        image: YOUR_DOCKER_ID/demo-app
+        image: kemails2006/demo-app
         registry: docker.io
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
