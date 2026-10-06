@@ -1,0 +1,121 @@
+name: loan-pipeline-demo
+
+on:
+  workflow_dispatch:                 # manual "Run workflow" button with inputs
+    inputs:
+      credit_score:
+        description: Applicant credit score
+        required: true
+        default: '720'
+      annual_income:
+        description: Annual income
+        required: true
+        default: '80000'
+      loan_amount:
+        description: Requested loan amount
+        required: true
+        default: '300000'
+
+permissions:
+  contents: read
+
+jobs:
+  rules-and-decision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      decision: ${{ steps.apply.outputs.decision }}
+    steps:
+    - name: Validate inputs are whole numbers
+      env:
+        SCORE: ${{ inputs.credit_score }}
+        INCOME: ${{ inputs.annual_income }}
+        LOAN: ${{ inputs.loan_amount }}
+      run: |
+        for v in "$SCORE" "$INCOME" "$LOAN"; do
+          case "$v" in
+            ''|*[!0-9]*) echo "::error::Input '$v' is not a whole number"; exit 1 ;;
+          esac
+        done
+
+    - name: Write the decision rule
+      run: |
+        cat > "$RUNNER_TEMP/decide.sh" <<'EOF'
+        decide() {
+          local score=$1 income=$2 loan=$3
+          if [ "$score" -lt 600 ]; then echo DECLINE
+          elif [ "$loan" -gt $((income * 5)) ]; then echo DECLINE
+          elif [ "$score" -ge 700 ]; then echo APPROVE
+          else echo REFER
+          fi
+        }
+        EOF
+
+    - name: Regression-test the rule against known applicants
+      run: |
+        source "$RUNNER_TEMP/decide.sh"
+        failures=0
+        while read -r score income loan expected; do
+          actual=$(decide "$score" "$income" "$loan")
+          if [ "$actual" = "$expected" ]; then
+            echo "PASS  score=$score income=$income loan=$loan -> $actual"
+          else
+            echo "::error::FAIL score=$score income=$income loan=$loan expected=$expected got=$actual"
+            failures=$((failures + 1))
+          fi
+        done <<'CASES'
+        750 80000 300000 APPROVE
+        720 80000 500000 DECLINE
+        650 80000 200000 REFER
+        580 90000 100000 DECLINE
+        700 60000 300000 APPROVE
+        699 60000 300000 REFER
+        CASES
+        [ "$failures" -eq 0 ]
+
+    - name: Apply the rule to this application
+      id: apply
+      env:
+        SCORE: ${{ inputs.credit_score }}
+        INCOME: ${{ inputs.annual_income }}
+        LOAN: ${{ inputs.loan_amount }}
+      run: |
+        source "$RUNNER_TEMP/decide.sh"
+        decision=$(decide "$SCORE" "$INCOME" "$LOAN")
+        echo "decision=$decision" >> "$GITHUB_OUTPUT"
+        {
+          echo "### Loan decision: $decision"
+          echo "| Score | Income | Loan |"
+          echo "|---|---|---|"
+          echo "| $SCORE | $INCOME | $LOAN |"
+        } >> "$GITHUB_STEP_SUMMARY"
+        echo "{\"decision\":\"$decision\",\"score\":$SCORE,\"income\":$INCOME,\"loan\":$LOAN}" > decision.json
+
+    - name: Keep the decision record as evidence
+      uses: actions/upload-artifact@v4
+      with:
+        name: decision-record
+        path: decision.json
+
+  manual-review:
+    needs: rules-and-decision
+    if: needs.rules-and-decision.outputs.decision == 'REFER'
+    runs-on: ubuntu-latest
+    environment: manual-underwriting   # add required reviewers here (Step 3)
+    steps:
+    - run: echo "Underwriter approved the referred application"
+
+  disbursement:
+    needs: rules-and-decision
+    if: needs.rules-and-decision.outputs.decision == 'APPROVE'
+    runs-on: ubuntu-latest
+    environment: disbursement          # add required reviewers here (Step 3)
+    steps:
+    - run: echo "Funds released"
+
+  decline-notice:
+    needs: rules-and-decision
+    if: needs.rules-and-decision.outputs.decision == 'DECLINE'
+    runs-on: ubuntu-latest
+    steps:
+    - run: echo "Decline notice sent to applicant"
